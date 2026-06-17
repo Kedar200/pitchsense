@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { getTicket, runTriage, reviewTicket, resolveTicket } from "@/lib/api";
-import type { ReviewAction } from "@/types";
+import type { ReviewAction, Ticket } from "@/types";
 
 interface Props {
   ticketId: string;
@@ -36,33 +36,45 @@ export function TicketDetail({ ticketId, onClose, onUpdated }: Props) {
   const qc = useQueryClient();
   const [draftText, setDraftText] = useState<string | null>(null);
   const [reviewError, setReviewError] = useState("");
+  const [triageError, setTriageError] = useState("");
 
   const { data: ticket, isLoading, error } = useQuery({
     queryKey: ["ticket", ticketId],
     queryFn: () => getTicket(ticketId),
   });
 
-  // Initialise draft text when ticket first loads
+  // Keep editor state tied to the selected ticket/draft.
   useEffect(() => {
-    if (ticket?.draft_response && draftText === null) {
-      setDraftText(ticket.draft_response.suggested_reply);
-    }
-  }, [ticket, draftText]);
+    setDraftText(
+      ticket?.draft_response
+        ? ticket.draft_response.reviewer_edits ?? ticket.draft_response.suggested_reply
+        : null
+    );
+    setReviewError("");
+    setTriageError("");
+  }, [ticketId, ticket?.draft_response?.id, ticket?.draft_response?.updated_at]);
 
   const triageMutation = useMutation({
     mutationFn: () => runTriage(ticketId),
+    onMutate: () => setTriageError(""),
     onSuccess: (t) => {
       qc.setQueryData(["ticket", ticketId], t);
-      setDraftText(t.draft_response?.suggested_reply ?? null);
+      setDraftText(t.draft_response?.reviewer_edits ?? t.draft_response?.suggested_reply ?? null);
       onUpdated();
     },
+    onError: (e: Error) => setTriageError(e.message),
   });
 
   const reviewMutation = useMutation({
     mutationFn: (payload: { action: ReviewAction; reviewer_edits?: string }) =>
       reviewTicket(ticketId, payload),
-    onSuccess: ({ ticket: t }) => {
-      qc.setQueryData(["ticket", ticketId], { ...ticket, ...t });
+    onSuccess: ({ ticket: t, draft_response }) => {
+      qc.setQueryData<Ticket>(["ticket", ticketId], (old) => ({
+        ...(old ?? ticket),
+        ...t,
+        draft_response,
+      }));
+      setDraftText(draft_response.reviewer_edits ?? draft_response.suggested_reply);
       onUpdated();
       setReviewError("");
     },
@@ -103,7 +115,7 @@ export function TicketDetail({ ticketId, onClose, onUpdated }: Props) {
   const draft = ticket.draft_response;
   const isReviewed = ["accepted", "edited", "rejected", "resolved"].includes(ticket.status);
   const isResolved = ticket.status === "resolved";
-  const canTriage = !["resolved"].includes(ticket.status);
+  const canTriage = ["new", "pending_review", "rejected"].includes(ticket.status);
   const canReview = ticket.status === "pending_review";
   const canResolve = ["accepted", "edited"].includes(ticket.status);
   const effectiveDraft = draftText ?? draft?.suggested_reply ?? "";
@@ -156,6 +168,12 @@ export function TicketDetail({ ticketId, onClose, onUpdated }: Props) {
             <div className="triage-running" style={{ marginTop: 16 }}>
               <div className="spinner" style={{ borderTopColor: "var(--accent)" }} />
               AI is analysing the ticket…
+            </div>
+          )}
+
+          {triageError && (
+            <div className="error-banner" style={{ marginTop: 16 }}>
+              {triageError}
             </div>
           )}
 

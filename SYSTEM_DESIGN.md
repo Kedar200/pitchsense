@@ -13,7 +13,7 @@ graph TD
     Client[Next.js Frontend\nReact, TanStack Query]
     API[Express.js Backend\nREST API, Zod Validation]
     DB[(SQLite Database\nbetter-sqlite3)]
-    AI[Mock Triage Service\nKeyword/Heuristic Engine]
+    AI[Mock/OpenRouter Triage Service\nStructured JSON Engine]
     
     Client -- HTTP GET/POST --> API
     API -- Read/Write --> DB
@@ -23,7 +23,7 @@ graph TD
 
 ### Why this stack?
 - **Backend (Express.js + TypeScript)**: Express is the standard for Node.js REST APIs. By keeping it separate from the Next.js frontend, we ensure the backend can be independently tested (via Supertest/Vitest) and graded.
-- **Frontend (Next.js 14 App Router)**: Provides a robust React framework with file-based routing. We use TanStack Query for server state management (caching, polling, optimistic updates).
+- **Frontend (Next.js 15 App Router)**: Provides a robust React framework with file-based routing. We use TanStack Query for server state management (caching, polling, optimistic updates).
 - **Database (SQLite)**: Chosen for simplicity and zero-configuration setup, meeting the assignment's requirement for a lightweight storage solution. `better-sqlite3` provides a fast, synchronous API.
 - **Validation (Zod)**: Used extensively on the backend to validate incoming API payloads and, crucially, to validate the output from the AI Triage service before it hits the database.
 
@@ -99,7 +99,7 @@ stateDiagram-v2
 
 ## 3. AI Triage Service Strategy
 
-The AI Triage requirement is fulfilled using a **Mock LLM Strategy** that simulates an LLM returning structured JSON. 
+The AI triage requirement is fulfilled with a mock-first strategy and an optional OpenRouter integration. Both paths return structured JSON that is validated before storage.
 
 ### Why a Mock?
 The assignment permits a documented mock mode. This avoids the need for reviewers to supply their own API keys (OpenAI/Gemini) while still demonstrating how an LLM integration would be architected.

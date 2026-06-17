@@ -1,5 +1,6 @@
 import type {
   Ticket,
+  DraftResponse,
   Analytics,
   CreateTicketPayload,
   ReviewPayload,
@@ -47,8 +48,11 @@ export function runTriage(id: string): Promise<Ticket> {
   return apiFetch<Ticket>(`/tickets/${id}/triage`, { method: "POST" });
 }
 
-export function reviewTicket(id: string, payload: ReviewPayload): Promise<{ ticket: Ticket }> {
-  return apiFetch<{ ticket: Ticket }>(`/tickets/${id}/review`, {
+export function reviewTicket(
+  id: string,
+  payload: ReviewPayload
+): Promise<{ ticket: Ticket; draft_response: DraftResponse }> {
+  return apiFetch<{ ticket: Ticket; draft_response: DraftResponse }>(`/tickets/${id}/review`, {
     method: "POST",
     body: JSON.stringify(payload),
   });

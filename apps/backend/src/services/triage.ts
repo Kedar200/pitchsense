@@ -1,5 +1,24 @@
 import { RawLLMOutput, RawLLMOutputSchema, Ticket } from "../models/schemas";
 
+const OPENROUTER_MODEL = "openai/gpt-4o-mini";
+
+function truncate(value: string, max = 80): string {
+  return value.length > max ? `${value.slice(0, max - 3)}...` : value;
+}
+
+function formatError(err: unknown): string {
+  if (err instanceof Error) return `${err.name}: ${err.message}`;
+  return String(err);
+}
+
+function logResult(source: string, ticket: Ticket, output: RawLLMOutput, startedAt: number): void {
+  console.info(
+    `[triage] completed source=${source} ticket_id=${ticket.id} duration_ms=${Date.now() - startedAt} ` +
+      `category=${output.category} urgency=${output.urgency} priority=${output.priority} ` +
+      `confidence=${output.confidence} tone=${output.tone}`
+  );
+}
+
 // ─── Keyword rules for mock mode ──────────────────────────────────────────────
 
 const RULES: Array<{
@@ -95,22 +114,32 @@ function buildExplanation(category: string, urgency: string, confidence: number)
 // ─── Triage Service ───────────────────────────────────────────────────────────
 
 export class TriageService {
-  private provider: string;
-
-  constructor() {
-    this.provider = process.env.LLM_PROVIDER ?? "mock";
-  }
-
   async triage(ticket: Ticket): Promise<RawLLMOutput> {
-    if (this.provider === "openrouter") {
+    const startedAt = Date.now();
+    const provider = process.env.LLM_PROVIDER ?? "mock";
+
+    console.info(
+      `[triage] started ticket_id=${ticket.id} status=${ticket.status} provider=${provider} ` +
+        `subject="${truncate(ticket.subject)}"`
+    );
+
+    if (provider === "openrouter") {
       try {
-        return await this.openRouterTriage(ticket);
+        const output = await this.openRouterTriage(ticket);
+        logResult("openrouter", ticket, output, startedAt);
+        return output;
       } catch (err) {
-        console.error("⚠️ OpenRouter triage failed, falling back to mock:", err);
-        return this.mockTriage(ticket);
+        console.error(
+          `[triage] openrouter_failed ticket_id=${ticket.id} duration_ms=${Date.now() - startedAt} ` +
+            `error="${formatError(err)}"`
+        );
+        throw err;
       }
     }
-    return this.mockTriage(ticket);
+
+    const output = this.mockTriage(ticket);
+    logResult("mock", ticket, output, startedAt);
+    return output;
   }
 
   private async openRouterTriage(ticket: Ticket): Promise<RawLLMOutput> {
@@ -118,6 +147,11 @@ export class TriageService {
     if (!apiKey) {
       throw new Error("OPENROUTER_API_KEY is not set in environment");
     }
+
+    console.info(
+      `[triage] openrouter_request ticket_id=${ticket.id} model=${OPENROUTER_MODEL} ` +
+        `api_key_present=${Boolean(apiKey)}`
+    );
 
     const systemPrompt = `You are an AI customer support triage agent. Your job is to classify incoming support tickets and suggest a reply.
 You MUST output strictly in JSON format matching the following schema. Do NOT wrap the JSON in markdown blocks like \`\`\`json. Return only the raw JSON string.
@@ -146,7 +180,7 @@ Message: ${ticket.message}`;
         "X-Title": "Support Inbox AI Triage",
       },
       body: JSON.stringify({
-        model: "openai/gpt-4o-mini",
+        model: OPENROUTER_MODEL,
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt }
@@ -155,9 +189,13 @@ Message: ${ticket.message}`;
       }),
     });
 
+    console.info(
+      `[triage] openrouter_response ticket_id=${ticket.id} status=${response.status} ok=${response.ok}`
+    );
+
     if (!response.ok) {
       const text = await response.text();
-      throw new Error(`OpenRouter API error (${response.status}): ${text}`);
+      throw new Error(`OpenRouter API error (${response.status}): ${truncate(text, 300)}`);
     }
 
     const data = await response.json();
@@ -165,6 +203,10 @@ Message: ${ticket.message}`;
     if (!content) {
       throw new Error("No content returned from OpenRouter");
     }
+
+    console.info(
+      `[triage] openrouter_content ticket_id=${ticket.id} chars=${content.length}`
+    );
 
     let parsedJson;
     try {
@@ -176,9 +218,17 @@ Message: ${ticket.message}`;
     // Validate the parsed JSON using Zod
     const validated = RawLLMOutputSchema.safeParse(parsedJson);
     if (!validated.success) {
-      console.error("⚠️ OpenRouter output failed Zod validation:", validated.error.format());
+      console.error(
+        `[triage] openrouter_validation_failed ticket_id=${ticket.id}`,
+        validated.error.format()
+      );
       throw new Error("Output did not match the required schema");
     }
+
+    console.info(
+      `[triage] openrouter_validation_passed ticket_id=${ticket.id} ` +
+        `category=${validated.data.category} confidence=${validated.data.confidence}`
+    );
 
     return validated.data;
   }
@@ -186,8 +236,15 @@ Message: ${ticket.message}`;
   private mockTriage(ticket: Ticket): RawLLMOutput {
     const text = `${ticket.subject} ${ticket.message}`.toLowerCase();
 
-    let matched = RULES.find((rule) =>
+    const matched = RULES.find((rule) =>
       rule.keywords.some((kw) => text.includes(kw))
+    );
+
+    const matchedKeywords =
+      matched?.keywords.filter((kw) => text.includes(kw)).join(", ") || "none";
+    console.info(
+      `[triage] mock_rule_match ticket_id=${ticket.id} matched=${Boolean(matched)} ` +
+        `keywords="${matchedKeywords}"`
     );
 
     // Default fallback
@@ -209,7 +266,7 @@ Message: ${ticket.message}`;
     // Validate through Zod before returning
     const parsed = RawLLMOutputSchema.safeParse(raw);
     if (!parsed.success) {
-      console.error("⚠️  Triage output failed validation:", parsed.error.format());
+      console.error(`[triage] mock_validation_failed ticket_id=${ticket.id}`, parsed.error.format());
       // Return a safe fallback
       return {
         category: "general",

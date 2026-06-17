@@ -44,10 +44,16 @@ ticketsRouter.get("/", (req: Request, res: Response) => {
   if (category || priority) {
     const subIds = db
       .prepare(
-        `SELECT ticket_id FROM triage_results WHERE 1=1
-         ${category ? "AND category = ?" : ""}
-         ${priority ? "AND priority = ?" : ""}
-         ORDER BY created_at DESC`
+        `SELECT tr.ticket_id
+         FROM triage_results tr
+         WHERE tr.created_at = (
+           SELECT MAX(latest.created_at)
+           FROM triage_results latest
+           WHERE latest.ticket_id = tr.ticket_id
+         )
+         ${category ? "AND tr.category = ?" : ""}
+         ${priority ? "AND tr.priority = ?" : ""}
+         ORDER BY tr.created_at DESC`
       )
       .all(...[category, priority].filter(Boolean))
       .map((r: unknown) => (r as { ticket_id: string }).ticket_id);
@@ -102,8 +108,29 @@ ticketsRouter.get("/:id", (req: Request, res: Response) => {
 // ─── POST /api/tickets/:id/triage ────────────────────────────────────────────
 
 ticketsRouter.post("/:id/triage", async (req: Request, res: Response) => {
+  const requestStartedAt = Date.now();
+  console.info(`[api] POST /api/tickets/${req.params.id}/triage started`);
+
   const ticket = db.prepare("SELECT * FROM tickets WHERE id = ?").get(req.params.id) as Record<string, unknown> | undefined;
-  if (!ticket) return res.status(404).json({ error: "Ticket not found" });
+  if (!ticket) {
+    console.warn(`[api] triage rejected ticket_id=${req.params.id} reason=ticket_not_found`);
+    return res.status(404).json({ error: "Ticket not found" });
+  }
+
+  console.info(
+    `[api] triage ticket_loaded ticket_id=${ticket.id} status=${ticket.status} subject="${ticket.subject}"`
+  );
+
+  const allowedStatuses = ["new", "pending_review", "rejected"];
+  if (!allowedStatuses.includes(ticket.status as string)) {
+    console.warn(
+      `[api] triage rejected ticket_id=${ticket.id} status=${ticket.status} ` +
+        `allowed=${allowedStatuses.join("|")}`
+    );
+    return res.status(400).json({
+      error: `Cannot run triage for ticket in status '${ticket.status}'. Allowed statuses: ${allowedStatuses.join(", ")}.`,
+    });
+  }
 
   try {
     const llmOutput = await triageService.triage(ticket as never);
@@ -118,24 +145,39 @@ ticketsRouter.post("/:id/triage", async (req: Request, res: Response) => {
       llmOutput.urgency, llmOutput.priority, llmOutput.confidence,
       llmOutput.explanation, new Date().toISOString()
     );
+    console.info(
+      `[api] triage_result_inserted ticket_id=${ticket.id} triage_id=${triageId} ` +
+        `category=${llmOutput.category} priority=${llmOutput.priority} confidence=${llmOutput.confidence}`
+    );
 
     // Upsert draft response (delete old, insert new)
-    db.prepare("DELETE FROM draft_responses WHERE ticket_id = ?").run(ticket.id);
+    const deletedDrafts = db.prepare("DELETE FROM draft_responses WHERE ticket_id = ?").run(ticket.id);
     const draftId = randomUUID();
     const now = new Date().toISOString();
     db.prepare(
       `INSERT INTO draft_responses (id, ticket_id, suggested_reply, tone, status, reviewer_edits, created_at, updated_at)
        VALUES (?, ?, ?, ?, 'pending', NULL, ?, ?)`
     ).run(draftId, ticket.id, llmOutput.suggested_reply, llmOutput.tone, now, now);
+    console.info(
+      `[api] draft_response_upserted ticket_id=${ticket.id} draft_id=${draftId} ` +
+        `deleted_previous=${deletedDrafts.changes} chars=${llmOutput.suggested_reply.length}`
+    );
 
     // Update ticket status
     db.prepare("UPDATE tickets SET status = 'pending_review', updated_at = ? WHERE id = ?")
       .run(new Date().toISOString(), ticket.id);
+    console.info(
+      `[api] ticket_status_updated ticket_id=${ticket.id} status=pending_review ` +
+        `duration_ms=${Date.now() - requestStartedAt}`
+    );
 
     const updatedTicket = db.prepare("SELECT * FROM tickets WHERE id = ?").get(ticket.id) as Record<string, unknown>;
     return res.json(enrichTicket(updatedTicket));
   } catch (err) {
-    console.error("Triage error:", err);
+    console.error(
+      `[api] triage_failed ticket_id=${ticket.id} duration_ms=${Date.now() - requestStartedAt}`,
+      err
+    );
     return res.status(500).json({ error: "Triage failed. Please try again." });
   }
 });

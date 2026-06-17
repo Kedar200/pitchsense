@@ -29,7 +29,7 @@ npm run dev
 apps/
   backend/   Express.js REST API   → port 3001
   frontend/  Next.js App Router    → port 3000
-data/
+apps/backend/data/
   support_inbox.db                 SQLite database (auto-created on first run)
 ```
 
@@ -46,7 +46,7 @@ Next.js proxies all `/api/*` requests to Express via `next.config.ts` rewrites �
 | Backend | Express.js 4 + TypeScript | Standard, well-tested Node.js framework |
 | Database | SQLite (`better-sqlite3`) | Lightweight, zero-config, synchronous API |
 | Validation | Zod | Compile-time + runtime schema safety |
-| Frontend | Next.js 14 App Router | React-based, file-based routing, SSR capable |
+| Frontend | Next.js 15 App Router | React-based, file-based routing, SSR capable |
 | Data fetching | TanStack Query | Caching, background refetch, optimistic updates |
 | Tests | Vitest + supertest | Fast unit/integration tests |
 
@@ -86,10 +86,33 @@ The triage service (`apps/backend/src/services/triage.ts`) runs in **mock mode b
 ```bash
 cp .env.example .env
 # Edit .env:
-LLM_PROVIDER=openai
-OPENAI_API_KEY=sk-...
+LLM_PROVIDER=openrouter
+OPENROUTER_API_KEY=sk-or-v1-...
 ```
-The `TriageService` checks `process.env.LLM_PROVIDER` and routes accordingly.
+The `TriageService` checks `process.env.LLM_PROVIDER` and routes to OpenRouter when it is set to `openrouter`; otherwise it uses the local mock triage implementation.
+
+### Verifying AI vs Mock in Logs
+
+Keep the backend terminal open while clicking **Run Triage**. The logs show the exact path used:
+
+```text
+[triage] completed source=openrouter ...
+```
+
+means the real OpenRouter call succeeded.
+
+```text
+[triage] openrouter_failed ...
+[api] triage_failed ...
+```
+
+means OpenRouter failed and the request was not stored as a mock result. This keeps real-AI testing explicit when `LLM_PROVIDER=openrouter`.
+
+```text
+[triage] completed source=mock ...
+```
+
+means `LLM_PROVIDER=mock` was configured.
 
 ## Bonus Extension: SLA Warning
 
