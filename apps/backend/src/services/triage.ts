@@ -102,13 +102,85 @@ export class TriageService {
   }
 
   async triage(ticket: Ticket): Promise<RawLLMOutput> {
-    if (this.provider === "mock") {
-      return this.mockTriage(ticket);
+    if (this.provider === "openrouter") {
+      try {
+        return await this.openRouterTriage(ticket);
+      } catch (err) {
+        console.error("⚠️ OpenRouter triage failed, falling back to mock:", err);
+        return this.mockTriage(ticket);
+      }
     }
-    // TODO: wire real LLM providers here
-    // if (this.provider === "openai") return this.openaiTriage(ticket);
-    // if (this.provider === "gemini") return this.geminiTriage(ticket);
     return this.mockTriage(ticket);
+  }
+
+  private async openRouterTriage(ticket: Ticket): Promise<RawLLMOutput> {
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    if (!apiKey) {
+      throw new Error("OPENROUTER_API_KEY is not set in environment");
+    }
+
+    const systemPrompt = `You are an AI customer support triage agent. Your job is to classify incoming support tickets and suggest a reply.
+You MUST output strictly in JSON format matching the following schema. Do NOT wrap the JSON in markdown blocks like \`\`\`json. Return only the raw JSON string.
+
+{
+  "category": "billing" | "bug" | "feature_request" | "account_access" | "general",
+  "sentiment": "positive" | "neutral" | "negative" | "frustrated",
+  "urgency": "low" | "medium" | "high" | "critical",
+  "priority": "low" | "medium" | "high" | "critical",
+  "confidence": <number between 0 and 1 indicating your confidence in this classification>,
+  "explanation": "<brief explanation of why you chose this classification>",
+  "suggested_reply": "<a helpful, empathetic suggested reply draft for the agent to send to the customer>",
+  "tone": "<e.g. empathetic, professional, friendly>"
+}`;
+
+    const userPrompt = `Ticket from: ${ticket.customer_name}
+Subject: ${ticket.subject}
+Message: ${ticket.message}`;
+
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+        "HTTP-Referer": "http://localhost:3000",
+        "X-Title": "Support Inbox AI Triage",
+      },
+      body: JSON.stringify({
+        model: "openai/gpt-4o-mini",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt }
+        ],
+        response_format: { type: "json_object" },
+      }),
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`OpenRouter API error (${response.status}): ${text}`);
+    }
+
+    const data = await response.json();
+    const content = data.choices[0]?.message?.content;
+    if (!content) {
+      throw new Error("No content returned from OpenRouter");
+    }
+
+    let parsedJson;
+    try {
+      parsedJson = JSON.parse(content);
+    } catch (e) {
+      throw new Error(`Failed to parse JSON from OpenRouter response: ${content}`);
+    }
+
+    // Validate the parsed JSON using Zod
+    const validated = RawLLMOutputSchema.safeParse(parsedJson);
+    if (!validated.success) {
+      console.error("⚠️ OpenRouter output failed Zod validation:", validated.error.format());
+      throw new Error("Output did not match the required schema");
+    }
+
+    return validated.data;
   }
 
   private mockTriage(ticket: Ticket): RawLLMOutput {
